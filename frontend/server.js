@@ -1,6 +1,9 @@
+'use strict';
+
 console.log(`process.env.SERVER = ${process.env.SERVER}`);
 // get the environment variable, but default to localhost:8082 if its not set
 const SERVER = process.env.SERVER ? process.env.SERVER : "http://localhost:8082";
+const BUILDTIME = process.env.BUILDTIME ? process.env.BUILDTIME : "00-00-00";
 
 // express is a nodejs web server
 // https://www.npmjs.com/package/express
@@ -14,9 +17,7 @@ const bodyParser = require('body-parser');
 // https://www.npmjs.com/package/express-handlebars
 // - look inside the views folder for the templates
 // data is inserted into a template inside {{ }}
-const engine = require('express-handlebars').engine;
-
-
+const hbs = require('express-handlebars');
 
 // request is used to make REST calls to the backend microservice
 // details here: https://www.npmjs.com/package/request
@@ -27,7 +28,7 @@ const app = express();
 
 // set up handlbars as the templating engine
 app.set('view engine', 'hbs');
-app.engine('hbs', engine({
+app.engine('hbs', hbs({
     extname: 'hbs',
     defaultView: 'default'
 }));
@@ -62,7 +63,6 @@ app.get('/', (req, res) => {
                     });
             }
             else {
-                console.log('error:', error); // Print the error if one occurred
                 console.log('statusCode:', response && response.statusCode); // Print the response status code if a response was received
                 console.log(body); // print the return from the server microservice
                 res.render('home',
@@ -72,7 +72,8 @@ app.get('/', (req, res) => {
                         // {{body}} in the layout - the code
                         // in here inserts values from the JSON
                         // received from the server
-                        events: body.events
+                        events: body.events,
+                        buildtime: BUILDTIME
                     }); // pass the data from the server to the template
             }
         });
@@ -81,7 +82,7 @@ app.get('/', (req, res) => {
 
 
 // defines a route that receives the post request to /event
-app.post('/event',
+app.post('/events',
     urlencodedParser, // second argument - how to parse the uploaded content
     // into req.body
     (req, res) => {
@@ -92,7 +93,7 @@ app.post('/event',
         //  "start": "SERVER=http://localhost:8082 node server.js",
         request.post(  // first argument: url + data + formats
             {
-                url: SERVER + '/event',  // the microservice end point for adding an event
+                url: SERVER + '/events',  // the microservice end point for adding an event
                 body: req.body,  // content of the form
                 headers: { // uploading json
                     "Content-Type": "application/json"
@@ -111,6 +112,33 @@ app.post('/event',
     });
 
 // create other get and post methods here - version, login,  etc
+
+app.get('/like/:id', (req, res) => {
+    const id = req.params.id;
+    request.get(  // first argument: url + return format
+        {
+            url: SERVER + '/events/' + id + '?action=like',  // the microservice end point for events
+            json: true  // response from server will be json format
+        }, // second argument: function with three args,
+        // runs when server response received
+        // body hold the return from the server
+        (error, response, body) => {
+            if (error) {
+                console.log('error:', error); // Print the error if one occurred
+                res.render('error_message',
+                    {
+                        layout: 'default',  //the outer html page
+                        error: error // pass the data from the server to the template
+                    });
+            }
+            else {
+                console.log('statusCode:', response && response.statusCode); // Print the response status code if a response was received
+                console.log(body); // print the return from the server microservice
+                res.json(body); // pass the data from the server to the template
+            }
+        }
+    );
+});
 
 
 

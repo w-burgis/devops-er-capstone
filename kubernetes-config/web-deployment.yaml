@@ -17,7 +17,7 @@ spec:
         ver: v1.0
     spec:
       containers:
-      - image: 360990851379.dkr.ecr.us-east-1.amazonaws.com/events-website:v1.0
+      - image: wburgis/devops-er-frontend:1.0
         name: events-web
         ports:
         - containerPort: 8080
