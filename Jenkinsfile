@@ -1,6 +1,52 @@
 pipeline {
     agent any
+
+    environment {
+        PLATFORM = 'linux_amd64'        
+        BIN_PATH = '/var/lib/jenkins/.local/bin'
+        AWS_REGION = 'us-east-1'
+    }
+
     stages {
+        stage('Configure AWS Credentials') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'aws-creds', usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh '''
+                        echo "Configuring AWS credentials"
+                        aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+                        aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+                        aws configure set region ${AWS_REGION}
+                        echo "AWS credentials configured"
+                    '''
+                }
+            }
+        }
+
+        stage('Install kubectl') {
+            steps {            
+                echo "Installing eksctl"
+                sh 'curl -O "https://s3.us-west-2.amazonaws.com/amazon-eks/1.33.0/2025-05-01/bin/linux/amd64/kubectl"'
+                sh 'chmod +x ./kubectl'                                   
+                sh 'mkdir -p ~/.local/bin'                
+                sh 'mv ./kubectl ~/.local/bin/kubectl'                                     
+                echo "Getting kubectl version"                
+                sh '${BIN_PATH}/kubectl version --client=true'                       
+            }
+        }
+
+        stage('Install eksctl') {
+            steps {
+                script {
+                    echo "Installing eksctl"
+                    sh 'curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_${PLATFORM}.tar.gz"'                          
+                    sh 'tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm eksctl_$PLATFORM.tar.gz'
+                    sh 'mv /tmp/eksctl ~/.local/bin/eksctl'                    
+                    echo "Getting eksctl version"
+                    sh '${BIN_PATH}/eksctl version'
+                }                
+            }
+        }
+
         stage('Clone the devops repo') {
             steps {
                 echo 'Cloning devops project repository'
@@ -29,9 +75,6 @@ pipeline {
         
         
         stage('Determine new backend image tag') {
-            when {
-                expression { env.BUILD_BACKEND_IMAGE == 'true' }
-            }
             steps {
                 script {
                     def backendImage = 'wburgis/devops-er-backend'
@@ -61,7 +104,11 @@ pipeline {
                             }
                         }
 
-                        newTag = "${maxMajor}.${maxMinor + 1}"
+                        if (env.BUILD_BACKEND_IMAGE == 'true') {
+                            newTag = "${maxMajor}.${maxMinor + 1}"
+                        } else {
+                            newTag = "${maxMajor}.${maxMinor}"
+                        }
                     }
 
                     env.BACKEND_IMAGE_TAG = newTag
@@ -117,9 +164,6 @@ pipeline {
         
         
         stage('Determine new frontend image tag') {
-            when {
-                expression { env.BUILD_FRONTEND_IMAGE == 'true' }
-            }
             steps {
                 script {
                     def frontendImage = 'wburgis/devops-er-frontend'
@@ -149,7 +193,11 @@ pipeline {
                             }
                         }
 
-                        newTag = "${maxMajor}.${maxMinor + 1}"
+                        if (env.BUILD_FRONTEND_IMAGE == 'true') {
+                            newTag = "${maxMajor}.${maxMinor + 1}"
+                        } else {
+                            newTag = "${maxMajor}.${maxMinor}"
+                        }
                     }
 
                     env.FRONTEND_IMAGE_TAG = newTag
@@ -183,6 +231,116 @@ pipeline {
                         echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
                         docker push wburgis/devops-er-frontend:${FRONTEND_IMAGE_TAG}
                     '''
+                }
+            }
+        }
+
+        stage('Create EKS Cluster') {
+            when {
+                expression {
+                    // check if the cluster exists, if it does, skip this stage
+                    try {
+                        sh 'aws eks describe-cluster --name wcb-devops-capstone --region ${AWS_REGION}'
+                        catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                            // if the cluster exists, this will not throw an error
+                            echo "EKS Cluster already exists, skipping creation"
+                            // return false to skip the stage
+                            return false
+                        }
+                        return false // cluster exists, skip creation
+                    } catch (Exception e) {
+                        return true // cluster does not exist, proceed with creation
+                    }
+                }
+            }
+            steps {
+                echo "Creating EKS Cluster"
+                sh '${BIN_PATH}/eksctl create cluster -f kubernetes-config/cluster_config.yaml'       
+            }
+        }
+
+        stage('Deploy backend to EKS') {
+            steps {
+                script {
+                    echo "Deploying backend to EKS"
+            
+                    // Update kubeconfig to interact with the EKS cluster
+                    sh '''
+                        aws eks update-kubeconfig --region ${AWS_REGION} --name wcb-devops-capstone
+                    '''
+
+                    def currentImage = sh(
+                        script: """
+                            selector=\$(${BIN_PATH}/kubectl get service events-api-svc -o=jsonpath='{.spec.selector.ver}')
+                            pod=\$(${BIN_PATH}/kubectl get pods -l app=events-api,ver=\$selector -o=jsonpath='{.items[0].metadata.name}')
+                            ${BIN_PATH}/kubectl get pod \$pod -o=jsonpath='{.spec.containers[0].image}'
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    def newImage = "wburgis/devops-er-backend:${env.BACKEND_IMAGE_TAG}"
+                    def newVersion = env.BACKEND_IMAGE_TAG.replace('.', '-')
+
+                    if (currentImage != newImage) {
+                        echo "New image detected: ${newImage}. Updating deployment..."
+
+                        // Create new deployment for new version
+                        sh "sed 's|{{VERSION}}|${newVersion}|g; s|{{IMAGE}}|${newImage}|g' kubernetes-config/api-deployment-template.yaml > kubernetes-config/api-deployment-${newVersion}.yaml"
+                        sh "${BIN_PATH}/kubectl apply -f kubernetes-config/api-deployment-${newVersion}.yaml"
+
+                        // Update service with new version
+                        sh """
+                            ${BIN_PATH}/kubectl patch service events-api-svc \
+                            -p '{"spec": {"selector": {"app": "events-api", "ver": "${newVersion}"}}}'
+                        """
+                    } else {
+                        echo "Current frontend image: ${newImage} is up to date"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy frontend to EKS') {
+            steps {
+                script {
+                    echo "Deploying frontend to EKS"
+            
+                    // Update kubeconfig to interact with the EKS cluster
+                    sh '''
+                        aws eks update-kubeconfig --region ${AWS_REGION} --name wcb-devops-capstone
+                    '''
+            
+                    def currentImage = sh(
+                        script: """
+                            selector=\$(${BIN_PATH}/kubectl get service events-web-svc -o=jsonpath='{.spec.selector.ver}')
+                            pod=\$(${BIN_PATH}/kubectl get pods -l app=events-web,ver=\$selector -o=jsonpath='{.items[0].metadata.name}')
+                            ${BIN_PATH}/kubectl get pod \$pod -o=jsonpath='{.spec.containers[0].image}'
+                        """,
+                        returnStdout: true
+                    ).trim()
+ 
+
+                    def newImage = "wburgis/devops-er-frontend:${env.FRONTEND_IMAGE_TAG}"
+                    def newVersion = env.FRONTEND_IMAGE_TAG.replace('.', '-')
+
+                    echo "Current image: ${currentImage}"
+                    echo "New image: ${newImage}"
+
+                    if (currentImage != newImage) {
+                        echo "New image detected: ${newImage}. Updating deployment..."
+
+                        // Create new deployment for new version
+                        sh "sed 's|{{VERSION}}|${newVersion}|g; s|{{IMAGE}}|${newImage}|g' kubernetes-config/web-deployment-template.yaml > kubernetes-config/web-deployment-${newVersion}.yaml"
+                        sh "${BIN_PATH}/kubectl apply -f kubernetes-config/web-deployment-${newVersion}.yaml"
+
+                        // Update service with new version
+                        sh """
+                            ${BIN_PATH}/kubectl patch service events-web-svc \
+                            -p '{"spec": {"selector": {"app": "events-web", "ver": "${newVersion}"}}}'
+                        """
+                    } else {
+                        echo "Current frontend image: ${newImage} is up to date"
+                    }
                 }
             }
         }
