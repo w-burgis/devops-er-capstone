@@ -47,9 +47,9 @@ and all recommended plugins
 1. Make sure initial requirements are taking care of.
 2. Log into your Jenkins server as the admin user.
 3. From the main Dashboard, click "New Item". Then click "Pipeline" and give the pipeline a name (e.g. full-devops-pipeline).
-4. In the "General" section, give the pipeline a description and check the "GitHub Project" box. Paste `https://github.com/w-burgis/devops-er-capstone` into the "Project url" field.
+4. In the "General" section, give the pipeline a description and check the "GitHub Project" box. Paste `https://github.com/w-burgis/devops-er-capstone` into the "Project url" field (or the URL of your forked repo).
 5. In the "Triggers" section, select "GitHub hook trigger for GITScm polling".
-6. In the "Pipeline" section, select "Pipeline script from SCM." Under "SCM" choose "Git" and then paste `https://github.com/w-burgis/devops-er-capstone` into the "Repository URL" field. For the "Branch Specifier", enter `*/main` and ensure `Jenkinsfile` is the value for "Script Path".
+6. In the "Pipeline" section, select "Pipeline script from SCM." Under "SCM" choose "Git" and then paste `https://github.com/w-burgis/devops-er-capstone` (or the name of your forked repo) into the "Repository URL" field. For the "Branch Specifier", enter `*/main` and ensure `Jenkinsfile` is the value for "Script Path".
 7. Click "Save".
 
 ### Initial Kubernetes Setup
@@ -64,3 +64,10 @@ and all recommended plugins
 9. Run `kubectl apply -f db_init_job.yaml` to intialize the database.
 
 ## Testing Pipeline
+
+Though this pipeline can be tested in a variety of ways, try attempting the following scenarios:
+1. Trigger the pipeline manually from the Jenkins UI. Verify it finishes successfully and that new deployments are created and activated by the services, but new images are not built or pushed.
+2. Make a change to the codebase (not in the frontend or backend directory) and push it to GitHub. Verify the pipeline is automatically triggered, no builds or pushes take place, and no new Kubernetes deployments are created.
+3. Make a change in the backend directory and push it to GitHub. Verify the pipeline is automatically triggered, a new backend image with a new tag is built and pushed, and a new backend deployment is created that the backend service is updated with.
+4. Make a change in the `frontend/views/layouts/default.hbs` file's header (line 16) and push it to GitHub. Verify the pipeline is automatically triggered, a new frontend image with a new tag is built and pushed, and a new frontend deployment is created that the frontend service is updated with. Also verify the change has taken place in the UI of your application.
+5. Attempt any other changes you would like to be tested.
